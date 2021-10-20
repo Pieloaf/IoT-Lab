@@ -1,6 +1,6 @@
 /* main.c - Application main entry point */
 
-/* Based on an example from Zephyr toolkit, modified by frank duignan
+/* Based on an example from Zephyr toolkit, modified by frank duignan, modified again by pierce lowe
  * Copyright (c) 2015-2016 Intel Corporation
  *
  * SPDX-License-Identifier: Apache-2.0
@@ -17,6 +17,7 @@
 #include <errno.h>
 #include <sys/printk.h>
 #include <sys/byteorder.h>
+#include <kernel.h>
 #include <zephyr.h>
 
 #include <settings/settings.h>
@@ -30,7 +31,7 @@
 #include <drivers/sensor.h>
 #include <stdio.h>
 #include "sensirion_i2c.h"
-
+#include "buttons.h"
 #include "scd30.h"
 #include "matrix.h"
 
@@ -51,7 +52,7 @@ static ssize_t read_co2(struct bt_conn *conn, const struct bt_gatt_attr *attr, v
 }
 
 // Arguments to BT_GATT_CHARACTERISTIC = _uuid, _props, _perm, _read, _write, _value
-#define BT_GATT_CHAR1 BT_GATT_CHARACTERISTIC(&co2_id.uuid, BT_GATT_CHRC_READ , BT_GATT_PERM_READ , read_co2, NULL, &co2_value)
+#define BT_GATT_CHAR1 BT_GATT_CHARACTERISTIC(&co2_id.uuid, BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY, BT_GATT_PERM_READ, read_co2, NULL, &co2_value)
 // ********************[ End of First characteristic ]****************************************
 
 // ********************[ Start of Second characteristic ]**************************************
@@ -129,7 +130,7 @@ BT_GATT_SERVICE_DEFINE(my_service_svc,
 // bt_data is an array of data structures used in advertising. Each data structure is formatted as described above
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)), /* specify BLE advertising flags = discoverable, BR/EDR not supported (BLE only) */
-	BT_DATA_BYTES(BT_DATA_UUID128_SOME, BT_UUID_CUSTOM_SERVICE_VAL         /* A 128 Service UUID for the our custom service */),
+	BT_DATA_BYTES(BT_DATA_UUID16_ALL, BT_UUID_ESS_VAL         /* A 128 Service UUID for the our custom service */),
 };
 
 
@@ -181,11 +182,116 @@ static void bt_ready(void)
 	printf("Advertising successfully started\n");
 }
 
+#define STACK_SIZE 500
+#define BTN_B 23
+#define BTN_A 14
+
+int co2_threshold = 700;
+bool display_on = 0;
+int cols[3] = {0b01000, 0b00100, 0b00010};
+int rows[3] = {0b10000, 0b10000, 0b11111};
+void renderer_function(void *, void *, void *);
+
+K_THREAD_DEFINE(renderer_thread, STACK_SIZE, renderer_function, NULL, NULL, NULL, 15, 0, 0);
+
+void display_timeout(struct k_timer *timer_id){
+	display_on = 0;
+	return;
+}
+
+K_TIMER_DEFINE(display_timer, display_timeout, NULL);
+
+void set_digit(){
+	switch (co2_threshold)
+	{
+	case 700:
+		rows[0] = 0b11111;
+		rows[1] = 0b00001;
+		rows[2] = 0b00001;
+		break;
+	case 800:
+		rows[0] = 0b11111;
+		rows[1] = 0b10101;
+		rows[2] = 0b11111;
+		break;
+	case 600:
+		rows[0] = 0b11101;
+		rows[1] = 0b10101;
+		rows[2] = 0b11111;
+		break;
+	case 900:
+		rows[0] = 0b11111;
+		rows[1] = 0b10101;
+		rows[2] = 0b10111;
+		break;
+	case 500:
+		rows[0] = 0b11101;
+		rows[1] = 0b10101;
+		rows[2] = 0b10111;	
+		break;
+	default:
+		break;
+	}	
+	display_on = 1;
+	k_wakeup(renderer_thread);
+	k_timer_start(&display_timer, K_SECONDS(7), K_NO_WAIT);
+}
+
+void button_b_pressed()
+{
+	if (display_on && co2_threshold < 900){
+		co2_threshold+=100;
+	}
+	printf("%d\n", co2_threshold);
+	set_digit();
+	return;
+}
+
+void button_a_pressed()
+{
+	if (display_on && co2_threshold > 500){
+		co2_threshold-=100;
+	}
+	printf("%d\n", co2_threshold);
+	set_digit();
+	return;
+}
+
+void renderer_function(void *p1, void *p2, void *p3){
+	int err=0;
+	err = buttons_begin();	
+	if (err < 0)
+	{
+		printf("\nError initializing buttons. Error code = %d\n",err);	
+		while(1);
+	}
+	err = matrix_begin();
+	if (err) {
+		printf("Error reading initialising matrix: %i\n", err);
+		return;
+	}
+	attach_callback_to_button(button_a_pressed, BTN_A);	
+	attach_callback_to_button(button_b_pressed, BTN_B);
+
+	while(1)
+	{
+		matrix_all_off();
+		k_sleep(K_FOREVER);
+		while(display_on){
+			for (int i = 0; i < 3; i++){
+				matrix_put_pattern(rows[i], ~cols[i]);
+				k_msleep(5);
+			}
+		}
+	}
+	return;
+}
+
 void main(void)
 {
-	int err=0;
+	int err=0;	
     uint16_t interval_in_seconds = 2;
-    float co2_ppm, temperature, relative_humidity;
+    float co2_ppm, temperature, relative_humidity, prev_co2;
     co2_ppm = 0.0;
     temperature = 0.0; 
     relative_humidity = 0.0;
@@ -214,11 +320,6 @@ void main(void)
 		printk("Bluetooth init failed (err %d)\n", err);
 		return;
 	}
-	err = matrix_begin();
-	if (err) {
-		printf("Error reading initialising matrix: %i\n", err);
-		return;
-	}
 	bt_ready(); // This function starts advertising
 	bt_conn_cb_register(&conn_callbacks);
 	printf("Zephyr Microbit CO2 sensor %s\n", CONFIG_BOARD);		
@@ -233,7 +334,7 @@ void main(void)
 
         if (data_ready)
         {
-            
+            prev_co2 = co2_ppm; // store previous co2 value before updating
             err = scd30_read_measurement(&co2_ppm, &temperature, &relative_humidity);
             if (err) {
                 printf("error reading measurement\n");
@@ -247,10 +348,16 @@ void main(void)
             co2_value = co2_ppm;
             temp_value = temperature;
             hum_value = relative_humidity;
-			if (co2_ppm > 700){
-				matrix_put_pattern(0b11111, 0b00000);
-			} else {
-				matrix_put_pattern(0b00000, 0b11111);
+
+			// if the co2 level reaches the threshold
+			if (co2_value >= co2_threshold){
+				if (active_conn) bt_gatt_notify(active_conn,&my_service_svc.attrs[2], &co2_value, sizeof(co2_value));
+				if (!display_on) matrix_put_pattern(0b11111, 0b00000);
+			} 
+			// if co2 level returns to normal for after exceeding notify
+			else if (co2_ppm < co2_threshold && prev_co2 >= co2_threshold && !display_on){
+				// on dropping below threshold disable matrix
+				matrix_all_off();
 			}
 			
         }
