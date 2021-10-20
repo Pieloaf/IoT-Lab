@@ -189,7 +189,7 @@ static void bt_ready(void)
 int co2_threshold = 700;
 bool display_on = 0;
 int cols[3] = {0b01000, 0b00100, 0b00010};
-int rows[3] = {0b10000, 0b10000, 0b11111};
+int rows[3];
 void renderer_function(void *, void *, void *);
 
 K_THREAD_DEFINE(renderer_thread, STACK_SIZE, renderer_function, NULL, NULL, NULL, 15, 0, 0);
