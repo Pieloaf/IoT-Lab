@@ -30,6 +30,8 @@
 #include <device.h>
 #include <drivers/sensor.h>
 #include <stdio.h>
+#include <string.h>
+
 #include "sensirion_i2c.h"
 #include "buttons.h"
 #include "scd30.h"
@@ -41,7 +43,8 @@
 static struct bt_uuid_128 co2_id=BT_UUID_INIT_128(BT_UUID_CO2_VAL); // the 128 bit UUID for this gatt value
 uint32_t co2_value; // the gatt characateristic value that is being shared over BLE	
 static ssize_t read_co2(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf, uint16_t len, uint16_t offset);
-
+static ssize_t write_co2(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *buf, uint16_t len, uint16_t offset, uint8_t flags);
+int co2_threshold = 700;
 // Callback that is activated when the characteristic is read by central
 static ssize_t read_co2(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf, uint16_t len, uint16_t offset)
 {
@@ -51,8 +54,24 @@ static ssize_t read_co2(struct bt_conn *conn, const struct bt_gatt_attr *attr, v
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, value, sizeof(co2_value)); // pass the value back up through the BLE stack
 }
 
+static ssize_t write_co2(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+			 const void *buf, uint16_t len, uint16_t offset,
+			 uint8_t flags)
+{
+	uint8_t *value = attr->user_data;
+	int co2_write = atoi((char *)buf);
+	printf("Got a write %d\n",co2_write);
+	if (co2_write && co2_threshold != co2_write) {
+		co2_threshold = co2_write;
+		if(co2_write > co2_value) matrix_all_off();
+	}
+	
+	memcpy(value, buf, len); // copy the incoming value in the memory occupied by our characateristic variable
+	return len;
+}
+
 // Arguments to BT_GATT_CHARACTERISTIC = _uuid, _props, _perm, _read, _write, _value
-#define BT_GATT_CHAR1 BT_GATT_CHARACTERISTIC(&co2_id.uuid, BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY, BT_GATT_PERM_READ, read_co2, NULL, &co2_value)
+#define BT_GATT_CHAR1 BT_GATT_CHARACTERISTIC(&co2_id.uuid, BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY | BT_GATT_CHRC_WRITE , BT_GATT_PERM_READ | BT_GATT_PERM_WRITE, read_co2, write_co2, &co2_value)
 // ********************[ End of First characteristic ]****************************************
 
 // ********************[ Start of Second characteristic ]**************************************
@@ -186,7 +205,6 @@ static void bt_ready(void)
 #define BTN_B 23
 #define BTN_A 14
 
-int co2_threshold = 700;
 bool display_on = 0;
 int cols[3] = {0b01000, 0b00100, 0b00010};
 int rows[3];
@@ -234,25 +252,29 @@ void set_digit(){
 	}	
 	display_on = 1;
 	k_wakeup(renderer_thread);
-	k_timer_start(&display_timer, K_SECONDS(7), K_NO_WAIT);
+	k_timer_start(&display_timer, K_SECONDS(5), K_NO_WAIT);
 }
 
 void button_b_pressed()
 {
+	if (co2_threshold%100) co2_threshold = (co2_threshold/100)*100;
+	if (co2_threshold > 900) co2_threshold = 900;
 	if (display_on && co2_threshold < 900){
 		co2_threshold+=100;
 	}
-	printf("%d\n", co2_threshold);
+	printf("CO2 threshold: %d\n", co2_threshold);
 	set_digit();
 	return;
 }
 
 void button_a_pressed()
 {
+	if (co2_threshold%100) co2_threshold = (co2_threshold/100)*100;
+	if (co2_threshold < 500) co2_threshold = 500;
 	if (display_on && co2_threshold > 500){
 		co2_threshold-=100;
 	}
-	printf("%d\n", co2_threshold);
+	printf("CO2 threshold: %d\n", co2_threshold);
 	set_digit();
 	return;
 }
@@ -340,15 +362,17 @@ void main(void)
                 printf("error reading measurement\n");
 
             } else {
-                printf("measured co2 concentration: %0.2f ppm, "
-                   "measured temperature: %0.2f degreeCelsius, "
-                   "measured humidity: %0.2f %%RH\n",
+                printf("CO2(ppm)| temp(CO2)\t| humidity(%%RH)\n"
+                   "%0.2f\t| %0.2f\t| %0.2f\n\n",
                    co2_ppm, temperature, relative_humidity);
             }
             co2_value = co2_ppm;
             temp_value = temperature;
             hum_value = relative_humidity;
-
+			printf("Measured CO2 (ppm)\nprev\t| current\t| threshold\n"
+				"%0.2f\t| %0.2f\t| %d\n"
+				"===================================\n", 
+				prev_co2, co2_ppm, co2_threshold);
 			// if the co2 level reaches the threshold
 			if (co2_value >= co2_threshold){
 				if (active_conn) bt_gatt_notify(active_conn,&my_service_svc.attrs[2], &co2_value, sizeof(co2_value));
