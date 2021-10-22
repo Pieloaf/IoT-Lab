@@ -362,8 +362,8 @@ void main(void)
                 printf("error reading measurement\n");
 
             } else {
-                printf("CO2(ppm)| temp(CO2)\t| humidity(%%RH)\n"
-                   "%0.2f\t| %0.2f\t| %0.2f\n\n",
+                printf("CO2(ppm)| temp(degC)\t| humidity(%%RH)\n"
+                   "%0.2f\t| %0.2f\t\t| %0.2f\n\n",
                    co2_ppm, temperature, relative_humidity);
             }
             co2_value = co2_ppm;
