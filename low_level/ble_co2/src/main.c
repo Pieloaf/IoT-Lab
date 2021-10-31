@@ -54,15 +54,22 @@ static ssize_t read_co2(struct bt_conn *conn, const struct bt_gatt_attr *attr, v
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, value, sizeof(co2_value)); // pass the value back up through the BLE stack
 }
 
+//write function for co2 characteristic
 static ssize_t write_co2(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 			 const void *buf, uint16_t len, uint16_t offset,
 			 uint8_t flags)
 {
+	//set value = attribute data
 	uint8_t *value = attr->user_data;
+	//convert ascii number data to int
 	int co2_write = atoi((char *)buf);
 	printf("Got a write %d\n",co2_write);
+
+	//if conversion to int returns non 0 and is not the same as current val
 	if (co2_write && co2_threshold != co2_write) {
+		//set new threshold
 		co2_threshold = co2_write;
+		//if new threshold is less than current value, turn off leds 
 		if(co2_write > co2_value) matrix_all_off();
 	}
 	
@@ -149,7 +156,7 @@ BT_GATT_SERVICE_DEFINE(my_service_svc,
 // bt_data is an array of data structures used in advertising. Each data structure is formatted as described above
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)), /* specify BLE advertising flags = discoverable, BR/EDR not supported (BLE only) */
-	BT_DATA_BYTES(BT_DATA_UUID16_ALL, BT_UUID_ESS_VAL         /* A 128 Service UUID for the our custom service */),
+	BT_DATA_BYTES(BT_DATA_UUID16_ALL, BT_UUID_ESS_VAL         /* A 16 Service UUID for the a predefined ble service */),
 };
 
 
@@ -201,64 +208,78 @@ static void bt_ready(void)
 	printf("Advertising successfully started\n");
 }
 
+//renderer thread consts
 #define STACK_SIZE 500
 #define BTN_B 23
 #define BTN_A 14
 
+//renderer thread variables 
 bool display_on = 0;
 int cols[3] = {0b01000, 0b00100, 0b00010};
 int rows[3];
+//renderer thread main function decleration
 void renderer_function(void *, void *, void *);
 
+//renderer thread definition
 K_THREAD_DEFINE(renderer_thread, STACK_SIZE, renderer_function, NULL, NULL, NULL, 15, 0, 0);
 
+//display timeout callback
 void display_timeout(struct k_timer *timer_id){
 	display_on = 0;
 	return;
 }
 
+//defining display timer
 K_TIMER_DEFINE(display_timer, display_timeout, NULL);
 
 void set_digit(){
+	//set led display digit
 	switch (co2_threshold)
 	{
-	case 700:
-		rows[0] = 0b11111;
-		rows[1] = 0b00001;
-		rows[2] = 0b00001;
-		break;
-	case 800:
-		rows[0] = 0b11111;
-		rows[1] = 0b10101;
-		rows[2] = 0b11111;
-		break;
-	case 600:
-		rows[0] = 0b11101;
-		rows[1] = 0b10101;
-		rows[2] = 0b11111;
-		break;
-	case 900:
-		rows[0] = 0b11111;
-		rows[1] = 0b10101;
-		rows[2] = 0b10111;
-		break;
-	case 500:
-		rows[0] = 0b11101;
-		rows[1] = 0b10101;
-		rows[2] = 0b10111;	
-		break;
-	default:
-		break;
+		case 700:
+			rows[0] = 0b11111;
+			rows[1] = 0b00001;
+			rows[2] = 0b00001;
+			break;
+		case 800:
+			rows[0] = 0b11111;
+			rows[1] = 0b10101;
+			rows[2] = 0b11111;
+			break;
+		case 600:
+			rows[0] = 0b11101;
+			rows[1] = 0b10101;
+			rows[2] = 0b11111;
+			break;
+		case 900:
+			rows[0] = 0b11111;
+			rows[1] = 0b10101;
+			rows[2] = 0b10111;
+			break;
+		case 500:
+			rows[0] = 0b11101;
+			rows[1] = 0b10101;
+			rows[2] = 0b10111;	
+			break;
+		default:
+			break;
 	}	
+	//set display flag to 1 -> prevents all leds from lighting on co2 passing threshold
 	display_on = 1;
+	//wake up thread from sleep
 	k_wakeup(renderer_thread);
+	//start display timer, run for 5 secs, start immediately 
 	k_timer_start(&display_timer, K_SECONDS(5), K_NO_WAIT);
 }
 
+//b button call back
 void button_b_pressed()
 {
+	//if co2 threshold not muliple of 100, round down to nearest 100
 	if (co2_threshold%100) co2_threshold = (co2_threshold/100)*100;
+	//if co2 threshold over 900 set back to max of 900
 	if (co2_threshold > 900) co2_threshold = 900;
+	//if co2 threshold < 900, inc by 100
 	if (display_on && co2_threshold < 900){
 		co2_threshold+=100;
 	}
@@ -267,10 +288,14 @@ void button_b_pressed()
 	return;
 }
 
+//a button callback
 void button_a_pressed()
 {
+	//if co2 threshold not muliple of 100, round down to nearest 100
 	if (co2_threshold%100) co2_threshold = (co2_threshold/100)*100;
+	//if co2 threshold under 500 set back to min of 500
 	if (co2_threshold < 500) co2_threshold = 500;
+	//if co2 threshold > 500, dec by 100
 	if (display_on && co2_threshold > 500){
 		co2_threshold-=100;
 	}
@@ -279,7 +304,9 @@ void button_a_pressed()
 	return;
 }
 
+//renderer function implementation
 void renderer_function(void *p1, void *p2, void *p3){
+	//init buttons and matrix
 	int err=0;
 	err = buttons_begin();	
 	if (err < 0)
@@ -292,14 +319,20 @@ void renderer_function(void *p1, void *p2, void *p3){
 		printf("Error reading initialising matrix: %i\n", err);
 		return;
 	}
+	//attach button a and b callbacks
 	attach_callback_to_button(button_a_pressed, BTN_A);	
 	attach_callback_to_button(button_b_pressed, BTN_B);
 
+	//run forever
 	while(1)
 	{
+		//turn of leds and sleep forever
 		matrix_all_off();
 		k_sleep(K_FOREVER);
+
+		//after waking while display on = 1 
 		while(display_on){
+			//display digits
 			for (int i = 0; i < 3; i++){
 				matrix_put_pattern(rows[i], ~cols[i]);
 				k_msleep(5);
@@ -311,6 +344,7 @@ void renderer_function(void *p1, void *p2, void *p3){
 
 void main(void)
 {
+	//defining main func vars
 	int err=0;	
     uint16_t interval_in_seconds = 2;
     float co2_ppm, temperature, relative_humidity, prev_co2;
@@ -327,29 +361,26 @@ void main(void)
         sensirion_sleep_usec(1000000u);
     }
     printf("SCD30 sensor probing successful\n");
-
+	//init sdc30 
     scd30_set_measurement_interval(interval_in_seconds);
     sensirion_sleep_usec(20000u);
     scd30_start_periodic_measurement(0);
-	if (err < 0)
-	{
-		 printf("\nError initializing lsm303.  Error code = %d\n",err);  
-         while(1);
 
-	}
+	//init bluetooth
 	err = bt_enable(NULL);
 	if (err) {
 		printk("Bluetooth init failed (err %d)\n", err);
 		return;
 	}
 	bt_ready(); // This function starts advertising
-	bt_conn_cb_register(&conn_callbacks);
+	bt_conn_cb_register(&conn_callbacks); //sets connection call backs
 	printf("Zephyr Microbit CO2 sensor %s\n", CONFIG_BOARD);		
 		
 	while (1) {
-		k_sleep(K_SECONDS(1));
-        uint16_t data_ready = 0;
-        err = scd30_get_data_ready(&data_ready);
+		
+		k_sleep(K_SECONDS(1)); //sleep main thread for 1 sec
+        uint16_t data_ready = 0; //init data ready to 0 - FALSE
+		err = scd30_get_data_ready(&data_ready);
         if (err) {
 			printf("Error reading data_ready flag: %i\n", err);
         }
@@ -357,18 +388,21 @@ void main(void)
         if (data_ready)
         {
             prev_co2 = co2_ppm; // store previous co2 value before updating
-            err = scd30_read_measurement(&co2_ppm, &temperature, &relative_humidity);
+            err = scd30_read_measurement(&co2_ppm, &temperature, &relative_humidity); //read data
             if (err) {
                 printf("error reading measurement\n");
 
             } else {
+				//if no error display data on serial monitor
                 printf("CO2(ppm)| temp(degC)\t| humidity(%%RH)\n"
                    "%0.2f\t| %0.2f\t\t| %0.2f\n\n",
                    co2_ppm, temperature, relative_humidity);
             }
+			//update glob co2, temp and humidity values 
             co2_value = co2_ppm;
             temp_value = temperature;
             hum_value = relative_humidity;
+			//print prev co2 val, current co2 val, threshold
 			printf("Measured CO2 (ppm)\nprev\t| current\t| threshold\n"
 				"%0.2f\t| %0.2f\t| %d\n"
 				"===================================\n", 
