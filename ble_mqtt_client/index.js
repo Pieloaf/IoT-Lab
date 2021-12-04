@@ -290,15 +290,41 @@ async function initConnections() {
         await mqttClient.publish(`${pubTopic}/device/${id}`, JSON.stringify(chars));
       } else if (charateristics.map(char => char.name).includes(cmd)) {
         let charUUID = charateristics.find(char => char.name === cmd).uuid
-        let char = await ess.getCharacteristic(charUUID);
+
+        let char = await (async () => {
+          try {
+            let esschar = await ess.getCharacteristic(charUUID);
+            return esschar;
+          } catch (err) {
+            console.log(`[ERROR]: BLE - ${err}`);
+            return;
+          }
+        })();
+        if (!char) return;
+        // if (cmd === 'readVal') {
+        //   let val = await char.readValue();
+        //   await mqttClient.publish(`${pubTopic}/device/${id}/readVal`, val.toString());
+        // } else if (cmd === 'write') {
+        //   await char.writeValue(msg);
+        // } else if (cmd === 'notify') {
+        //   if (msg === 'true') {
+        //     await char.startNotifications();
+        //   }
+        //   else {
+        //     await char.stopNotifications();
+        //   }
+        // } else {
+        //   console.log(`[ERROR]: MQTT - Unknown command ${cmd}`);
+        // }
+
         if (!msg.toString()) {
           // get value
           let data = Buffer.from((await char.readValue()), 'hex').readInt32LE();
           await updateDeviceAct(id, `read ${cmd}`);
-          await mqttClient.publish(`${pubTopic}/device/${id}/${cmd}`, data);
+          await mqttClient.publish(`${pubTopic}/device/${id}/${cmd}`, data.toString());
         } else if (Number(msg)) {
           // set value
-          await char.writeValue(Buffer.from(msg.toString(), 'hex'));
+          await char.writeValue(Buffer.from(msg.toString()));
           await updateDeviceAct(id, `write ${cmd}`);
         } else if (msg.toString() === 'true') {
           // set notify
