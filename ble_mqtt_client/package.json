@@ -1,0 +1,17 @@
+{
+  "name": "ble_mqtt_client",
+  "version": "0.0.1",
+  "description": "BLE central and MQTT client for DT021A IoT module",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Pieloaf",
+  "license": "ISC",
+  "dependencies": {
+    "async-mqtt": "^2.6.1",
+    "mariadb": "^2.5.5",
+    "mqtt": "^4.2.8",
+    "node-ble": "^1.6.0"
+  }
+}
