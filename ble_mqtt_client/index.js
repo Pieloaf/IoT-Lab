@@ -1,19 +1,20 @@
 const mqtt = require('async-mqtt');
 const { createBluetooth } = require('node-ble');
 const mariadb = require('mariadb');
+const { exit } = require('process');
+const UUID = require('./uuidParse');
 
-const { exit, disconnect } = require('process');
-const { bluetooth, destroy } = createBluetooth();
-const path = require('path');
+const { bluetooth } = createBluetooth();
 
 const ROOM = process.env.ROOM;
-const PASSWORD = process.env.MQTT_CLIENT_PASSWORD;
+const MQTT_PASSWORD = process.env.MQTT_CLIENT_PASSWORD;
+const DB_PASSWORD = process.env.DB_PASSWORD;
 
 // db consts
 const dbOptions = {
   host: 'localhost',
   user: 'iotgateway',
-  password: 'iotlab2021',
+  password: DB_PASSWORD,
   database: 'iot',
 }
 
@@ -22,14 +23,20 @@ const mqttOptions = {
   protocol: "mqtts",
   port: 8883,
   username: "raspberry",
-  password: PASSWORD,
+  password: MQTT_PASSWORD,
   host: '845abfe393b744d3ac7c3553a089236f.s1.eu.hivemq.cloud',
   connectTimeout: 10 * 1000,
+  will: {
+    topic: `room/${ROOM}/status`,
+    payload: `offline`,
+    qos: 0,
+  }
 };
 
 const subTopic = `room-${ROOM}/command`;
 const pubTopic = `room-${ROOM}/response`
 const sub = {
+  broadcast: 'broadcast',
   // list; scan; connect -> id; disconnect -> id
   config: `${subTopic}/config/#`,
   // managment: /device/{id}/listChars; {char}/readVal, write, notify
@@ -46,35 +53,14 @@ const pub = {
 
 // BT consts
 const ess_uuid = '0000181a-0000-1000-8000-00805f9b34fb';
-const charateristics = [
-  {
-    uuid: '000002A70-0000-1000-8000-00805f9b34fb',
-    name: 'True Wind Speed',
-  },
-  {
-    uuid: '00002a01-0000-1000-8000-00805f9b34fb',
-    name: 'Pressure',
-  },
-  {
-    uuid: '00002a6e-0000-1000-8000-00805f9b34fb',
-    name: 'Temperature',
-  },
-  {
-    uuid: '00002a6f-0000-1000-8000-00805f9b34fb',
-    name: 'Humidity',
-  },
-  {
-    uuid: '00000001-0002-0003-0004-000000000001',
-    name: 'CO2',
-  }];
 
-
-// delay function
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+const expandUUID = (uuid) => {
+  uuid = uuid.toLowerCase();
+  if (!uuid.length === 4) {
+    return uuid;
+  }
+  return `0000${uuid}-0000-1000-8000-00805f9b34fb`;
 }
-
-//Buffer.from(dataBuffer, 'hex').readInt32LE()
 
 // Initialise client connections and get bt adapter
 async function initConnections() {
@@ -99,6 +85,7 @@ async function initConnections() {
       // create a client
       let client = await mqtt.connectAsync(mqttOptions.host, mqttOptions);
       console.log("[SUCCESS]: MQTT - Connected to cloud MQTT broker");
+      await client.publish(`room/${ROOM}/status`, 'online');
       // subscribe to topics
       let topics = Array.from(Object.values(sub))
       let resp = await client.subscribe(topics);
@@ -132,10 +119,12 @@ async function initConnections() {
 
   // list devices
   const listDevices = async (msg) => {
-    let devices = await dbConn.query(`SELECT * FROM devices ${msg.toString() === 'connected' ? 'WHERE connected = 1' : ''}`);
-    devices.length > 0
-      ? mqttClient.publish(pub.list, JSON.stringify(devices))
-      : mqttClient.publish(pub.list, JSON.stringify({ "Error": "No devices found" }));
+    try {
+      let devices = await dbConn.query(`SELECT * FROM devices ${msg.toString() === 'connected' ? 'WHERE connected = 1' : ''}`);
+      devices.length > 0
+        ? mqttClient.publish(pub.list, JSON.stringify(devices))
+        : mqttClient.publish(pub.list, JSON.stringify({ "Error": "No devices found" }));
+    } catch (err) { console.log(`[ERROR]: ${err}`); }
   }
 
   const timedScan = async (ms) => {
@@ -144,7 +133,7 @@ async function initConnections() {
     console.log("[INFO]: BLE - Scanning Devices...");
 
     //stop scanning after 5 seconds
-    await delay(ms);
+    await new Promise(resolve => setTimeout(resolve, ms));
     await adapter.stopDiscovery()
     console.log("[INFO]: BLE - Stopped discovery")
   }
@@ -153,8 +142,7 @@ async function initConnections() {
   const scan = async () => {
     // reset scanned devices
     scannedDevices = [];
-    timedScan(3000);
-
+    await timedScan(3000);
     // get scanned devices
     device_list = await adapter.devices();
     for (let i in device_list) {
@@ -168,46 +156,61 @@ async function initConnections() {
         }
       } catch (err) { /*pass*/ }
     };
-    // publish scanned devices
-    await mqttClient.publish(pubTopic, JSON.stringify(scannedDevices));
+    try {
+      // publish scanned devices
+      await mqttClient.publish(pubTopic, JSON.stringify(scannedDevices));
+    } catch (err) { console.log(`[ERROR]: MQTT - ${err}`); }
   }
 
   // update device activity
   const updateDeviceAct = async (mac, action, { name } = {}) => {
-    // get device id
-    let device = await dbConn.query(`SELECT device_id FROM devices WHERE mac_address = '${mac}'`);
-    // if device not in db add it
-    if (!device.length) {
-      dbConn.query(`INSERT INTO devices (device_name, mac_address, dt_added, connected) VALUES ('${name}', '${mac}', NOW(), FALSE)`);
-      device = await dbConn.query(`SELECT device_id FROM devices WHERE mac_address = '${mac}'`);
-    }
-    let id = device[0].device_id;
+    try {
+      // get device id
+      let device = await dbConn.query(`SELECT device_id FROM devices WHERE mac_address = '${mac}'`);
+      // if device not in db add it
+      if (!device.length) {
+        dbConn.query(`INSERT INTO devices (device_name, mac_address, dt_added, connected) VALUES ('${name}', '${mac}', NOW(), FALSE)`);
+        device = await dbConn.query(`SELECT device_id FROM devices WHERE mac_address = '${mac}'`);
+      }
+      let id = device[0].device_id;
 
-    // update device activity
-    if (action === 'connect' || action === 'disconnect') {
-      await dbConn.query(`UPDATE devices SET connected = ${action === 'connect' ? 'TRUE' : 'FALSE'} WHERE device_id = ${id}`);
-    }
-    await dbConn.query(`INSERT INTO device_activity (device_id, activity, timestamp) VALUES ('${id}', '${action}', NOW())`);
+      // update device activity
+      if (action === 'connect' || action === 'disconnect') {
+        await dbConn.query(`UPDATE devices SET connected = ${action === 'connect' ? 'TRUE' : 'FALSE'} WHERE device_id = ${id}`);
+      }
+      await dbConn.query(`INSERT INTO device_activity (device_id, activity, timestamp) VALUES ('${id}', '${action}', NOW())`);
+    } catch (err) { console.log(`[ERROR] DB - ${err}`) }
   }
 
   // connect to device
   const connect = async (mac) => {
     try {
       // get device
-      let device = await adapter.waitDevice(mac);
+      const device = await adapter.waitDevice(mac);
       let name = await device.getName()
       // connect to device
       await device.connect();
-      let gatt = await device.gatt();
+      const gatt = await device.gatt();
       if (!(await gatt.services()).includes(ess_uuid)) {
         await device.disconnect();
         console.log(`[ERROR]: BLE - Device ${name} does not have ESS service`);
         return;
       }
       console.log(`[SUCCESS]: BLE - Connected to ${name}`);
-      let essService = await gatt.getPrimaryService(ess_uuid)
+      let service = await gatt.getPrimaryService(ess_uuid);
+      let chars = await Promise.all((await service.characteristics()).map(async (char) => {
+        let charObj = await service.getCharacteristic(char);
+        charObj.on("valuechanged", async buffer => {
+          let data = Buffer.from(buffer, 'hex').readInt32LE();
+          try {
+            await mqttClient.publish(`${pubTopic}/device/${mac}`, data.toString());
+          } catch (err) { console.log(`[ERROR]: MQTT - ${err}`) }
+        }
+        )
+        return charObj;
+      }))
       // add device to list of connected devices
-      connectedDevices.push({ device_name: name, mac_address: mac, ess: essService });
+      connectedDevices.push({ device_name: name, mac_address: mac, chars: chars });
       // update device activity
       updateDeviceAct(mac, 'connect', { name: name });
     } catch (err) {
@@ -243,14 +246,21 @@ async function initConnections() {
   await dbConn.query(`SELECT * FROM devices`).then(async devices => {
     devices.forEach(async device => {
       timedScan(1000);
-      await connect(device.mac_address);
+      connect(device.mac_address).catch(err => {
+        console.log(`[ERROR]: BLE - Unable to connect to ${device.device_name}\n${err}`)
+      });
     })
   }).catch(err => { console.log(`[ERROR]: DB - ${err}`) });
 
 
-  mqttClient.on("message", async (topic, msg, pkt) => {
+  mqttClient.on("message", async (topic, msg) => {
     console.log(`[INFO]: MQTT - Received message on topic ${topic}`);
-    if (topic.includes(sub.config.replace('#', ''))) {
+    if (topic === sub.broadcast) {
+      try {
+        await mqttClient.publish(`room/${ROOM}/status`, 'online');
+      } catch (err) { console.log(`[ERROR]: MQTT - ${err}`) }
+    }
+    else if (topic.includes(sub.config.replace('#', ''))) {
       let [, cmd] = topic.split('config/');
       switch (cmd) {
         case 'list':
@@ -271,85 +281,68 @@ async function initConnections() {
         default:
           console.log(`[ERROR]: MQTT - Unknown command ${cmd}`);
       }
-    } else if (topic.includes(sub.device.replace('#', ''))) {
-      //managment: /device/{id}/listChars; {char}/readVal, write, notify
-      // actions: device/{id} sends {connected: bool, chars: {uuid: [perms]}} device/{id}/(co2, temp, hum)
+    }
+    else if (topic.includes(sub.device.replace('#', ''))) {
+
       let [, set] = topic.split('device/');
-      let [id, cmd] = set.split('/');
-      let ess = connectedDevices.find(dev => dev.mac_address === id).ess;
-      if (!cmd) {
-        // get device info
-        let charUUIDs = await ess.characteristics()
-        let chars = charateristics.filter(char => charUUIDs.includes(char.uuid))
-        await Promise.all(chars.map(async char => {
-          char.flags = await (await ess.getCharacteristic(char.uuid)).getFlags()
-          delete char.uuid
-          return char;
-        }));
+      let [mac, uuid, cmd] = set.split('/');
+      let chars = connectedDevices.find(dev => dev.mac_address === mac).chars;
 
-        await mqttClient.publish(`${pubTopic}/device/${id}`, JSON.stringify(chars));
-      } else if (charateristics.map(char => char.name).includes(cmd)) {
-        let charUUID = charateristics.find(char => char.name === cmd).uuid
-
+      if (!uuid) {
+        try {
+          let charResp = await Promise.all(chars.map(async char => {
+            char = new UUID(await char.getUUID()).get_uuid.characteristic()
+            return char;
+          }));
+          await mqttClient.publish(`${pubTopic}/device/${mac}`, JSON.stringify(charResp));
+        }
+        catch (err) { console.log(`[ERROR]: ${err}`) }
+      }
+      else {
+        uuid = expandUUID(uuid);
         let char = await (async () => {
-          try {
-            let esschar = await ess.getCharacteristic(charUUID);
-            return esschar;
-          } catch (err) {
-            console.log(`[ERROR]: BLE - ${err}`);
-            return;
+          for (let i in chars) {
+            if (await chars[i].getUUID() === uuid) return chars[i];
           }
         })();
-        if (!char) return;
-        // if (cmd === 'readVal') {
-        //   let val = await char.readValue();
-        //   await mqttClient.publish(`${pubTopic}/device/${id}/readVal`, val.toString());
-        // } else if (cmd === 'write') {
-        //   await char.writeValue(msg);
-        // } else if (cmd === 'notify') {
-        //   if (msg === 'true') {
-        //     await char.startNotifications();
-        //   }
-        //   else {
-        //     await char.stopNotifications();
-        //   }
-        // } else {
-        //   console.log(`[ERROR]: MQTT - Unknown command ${cmd}`);
-        // }
-
-        if (!msg.toString()) {
-          // get value
-          let data = Buffer.from((await char.readValue()), 'hex').readInt32LE();
-          await updateDeviceAct(id, `read ${cmd}`);
-          await mqttClient.publish(`${pubTopic}/device/${id}/${cmd}`, data.toString());
-        } else if (Number(msg)) {
-          // set value
-          await char.writeValue(Buffer.from(msg.toString()));
-          await updateDeviceAct(id, `write ${cmd}`);
-        } else if (msg.toString() === 'true') {
-          // set notify
-          await char.startNotifications();
-          await updateDeviceAct(id, `notify ${cmd}`);
-        } else if (msg.toString() === 'false') {
-          // stop notify
-          await char.stopNotifications();
-          await updateDeviceAct(id, `notify ${cmd}`);
+        if (!char) {
+          console.log(`[ERROR]: Unknown characteristic ${uuid}`)
+          return;
+        }
+        if (cmd === 'read') {
+          try {
+            let data = Buffer.from((await char.readValue()), 'hex').readInt32LE();
+            await updateDeviceAct(mac, `read ${cmd}`);
+            await mqttClient.publish(`${pubTopic}/device/${mac}`, data.toString());
+          }
+          catch (err) { console.log(`[ERROR]: ${err}`) }
+        }
+        else if (cmd === 'write') {
+          try {
+            await char.writeValue(Buffer.from(msg.toString()));
+            await updateDeviceAct(mac, `write ${cmd}`);
+          }
+          catch (err) { console.log(`[ERROR]: BLE - ${err}`); }
+        }
+        else if (cmd === 'notify') {
+          if (msg.toString() === 'true') {
+            try {
+              await char.startNotifications();
+              await updateDeviceAct(mac, `notify on`);
+            }
+            catch (err) { console.log(`[ERROR]: BLE - ${err}`) }
+          }
+          else if (msg.toString() === 'false') {
+            try {
+              await char.stopNotifications();
+              await updateDeviceAct(mac, `notify off`);
+            }
+            catch (err) { console.log(`[ERROR]: BLE - ${err}`) }
+          }
         } else {
           console.log(`[ERROR]: MQTT - Unknown command ${cmd}`);
         }
       }
     }
   })
-  //         // get bluetooth adapter
-  //         const adapter = await bluetooth.defaultAdapter() //get an available Bluetooth adapter
-  //         await discover(adapter);
-
-
-
-
-
-})()
-
-
-
-
+})();
