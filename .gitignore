@@ -1,2 +1,5 @@
 build
 .vscode
+node_modules/
+old/
+package-lock.json
