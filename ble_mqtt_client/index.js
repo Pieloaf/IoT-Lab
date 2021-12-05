@@ -56,7 +56,7 @@ const ess_uuid = '0000181a-0000-1000-8000-00805f9b34fb';
 
 const expandUUID = (uuid) => {
   uuid = uuid.toLowerCase();
-  if (!uuid.length === 4) {
+  if (uuid.length > 4) {
     return uuid;
   }
   return `0000${uuid}-0000-1000-8000-00805f9b34fb`;
@@ -203,7 +203,7 @@ async function initConnections() {
         charObj.on("valuechanged", async buffer => {
           let data = Buffer.from(buffer, 'hex').readInt32LE();
           try {
-            await mqttClient.publish(`${pubTopic}/device/${mac}`, data.toString());
+            await mqttClient.publish(`${pubTopic}/device/${mac}/${new UUID(await charObj.getUUID()).get_uuid.characteristic().name}/notify`, data.toString());
           } catch (err) { console.log(`[ERROR]: MQTT - ${err}`) }
         }
         )
@@ -212,7 +212,9 @@ async function initConnections() {
       // add device to list of connected devices
       connectedDevices.push({ device_name: name, mac_address: mac, chars: chars });
       // update device activity
-      updateDeviceAct(mac, 'connect', { name: name });
+      await updateDeviceAct(mac, 'connect', { name: name });
+      // publish to broker
+      await mqttClient.publish(`${pub.device}/${mac}/status`, 'connected');
     } catch (err) {
       console.log(`[ERROR]: BLE - ${err}`);
       return;
@@ -227,6 +229,8 @@ async function initConnections() {
       // disconnect from device
       await device.disconnect();
       console.log(`[SUCCESS]: BLE - Disconnected from ${name}`);
+      // publish to broker
+      await mqttClient.publish(`${pub.device}/${mac}/status`, 'disconnected');
       // remove device from list of connected devices
       connectedDevices.splice(connectedDevices.findIndex(dev => dev.mac_address === mac), 1);
       // update device activity
@@ -257,7 +261,7 @@ async function initConnections() {
     console.log(`[INFO]: MQTT - Received message on topic ${topic}`);
     if (topic === sub.broadcast) {
       try {
-        await mqttClient.publish(`room/${ROOM}/status`, 'online');
+        await mqttClient.publish(`room/${ROOM}/status`, "online");
       } catch (err) { console.log(`[ERROR]: MQTT - ${err}`) }
     }
     else if (topic.includes(sub.config.replace('#', ''))) {
@@ -286,13 +290,14 @@ async function initConnections() {
 
       let [, set] = topic.split('device/');
       let [mac, uuid, cmd] = set.split('/');
-      let chars = connectedDevices.find(dev => dev.mac_address === mac).chars;
+      let chars = connectedDevices.find(dev => dev.mac_address === mac)?.chars;
 
       if (!uuid) {
         try {
           let charResp = await Promise.all(chars.map(async char => {
-            char = new UUID(await char.getUUID()).get_uuid.characteristic()
-            return char;
+            let charObj = new UUID(await char.getUUID()).get_uuid.characteristic()
+            charObj.flags = await char.getFlags();
+            return charObj;
           }));
           await mqttClient.publish(`${pubTopic}/device/${mac}`, JSON.stringify(charResp));
         }
@@ -313,7 +318,7 @@ async function initConnections() {
           try {
             let data = Buffer.from((await char.readValue()), 'hex').readInt32LE();
             await updateDeviceAct(mac, `read ${cmd}`);
-            await mqttClient.publish(`${pubTopic}/device/${mac}`, data.toString());
+            await mqttClient.publish(`${pubTopic}/device/${mac}/${new UUID(await char.getUUID()).get_uuid.characteristic().name}`, data.toString());
           }
           catch (err) { console.log(`[ERROR]: ${err}`) }
         }
@@ -325,20 +330,18 @@ async function initConnections() {
           catch (err) { console.log(`[ERROR]: BLE - ${err}`); }
         }
         else if (cmd === 'notify') {
-          if (msg.toString() === 'true') {
-            try {
-              await char.startNotifications();
-              await updateDeviceAct(mac, `notify on`);
-            }
-            catch (err) { console.log(`[ERROR]: BLE - ${err}`) }
-          }
-          else if (msg.toString() === 'false') {
-            try {
+          try {
+            if (await char.isNotifying()) {
               await char.stopNotifications();
               await updateDeviceAct(mac, `notify off`);
             }
-            catch (err) { console.log(`[ERROR]: BLE - ${err}`) }
+            else {
+              await char.startNotifications();
+              await updateDeviceAct(mac, `notify on`);
+            }
           }
+          catch (err) { console.log(`[ERROR]: BLE - ${err}`) }
+
         } else {
           console.log(`[ERROR]: MQTT - Unknown command ${cmd}`);
         }
