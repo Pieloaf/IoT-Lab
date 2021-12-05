@@ -1,3 +1,6 @@
 [submodule "ble_mqtt_client/bluetooth-numbers-database"]
 	path = ble_mqtt_client/bluetooth-numbers-database
 	url = https://github.com/NordicSemiconductor/bluetooth-numbers-database.git
+[submodule "dashboard_demo/VanillaToasts"]
+	path = dashboard_demo/VanillaToasts
+	url = https://github.com/AlexKvazos/VanillaToasts.git
