@@ -1,0 +1,16 @@
+{
+    "Contributor": "Pierce Lowe",
+    "Coverage": "11/12/2021 - 12/12/2021 and 28/12/2021 - 29/12/2021",
+    "Creator": "Pierce Lowe",
+    "Date": "2021",
+    "Description": "This data set holds a record of the environmental data of a workspace over a period of 4 days",
+    "Identifier": "Workspace CO2 Data 11/12/2021 - 12/12/2021 and 28/12/2021 - 29/12/2021 (Pierce Lowe)",
+    "Language": "English",
+    "Publisher": "Pierce Lowe",
+    "Relation": "RMicrobit database [A MariaDB database on the gateway device which recorded the data. It contains data about the gateway device, recording device and an equivalent dataset as a relational database table]",
+    "Rights": "Open",
+    "Source": "",
+    "Subject": "CO2 Levels (ppm)",
+    "Title": "Workspace CO2 Levels",
+    "Type": "Dataset"
+}
