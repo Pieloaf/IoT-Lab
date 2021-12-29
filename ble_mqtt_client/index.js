@@ -2,6 +2,7 @@
 const mqtt = require('async-mqtt');
 const { createBluetooth } = require('node-ble');
 const mariadb = require('mariadb');
+const Influx = require('influx');
 const { exit } = require('process');
 
 // import uuid function
@@ -17,7 +18,21 @@ const dbOptions = {
   host: 'localhost',
   user: 'iotgateway',
   password: DB_PASSWORD,
-  database: 'iot',
+  database: 'RMicrobit',
+}
+
+const influxOpts = {
+  host: 'localhost',
+  username: 'iotgateway',
+  password: DB_PASSWORD,
+  database: 'IMicrobit',
+  schema: [{
+    measurement: 'sensor_data',
+    fields: {
+      value: Influx.FieldType.INTEGER
+    },
+    tags: ['room', 'device_ID', 'device_name', 'sensor_ID', 'sensor_name']
+  }]
 }
 
 // MQTT connection options
@@ -29,8 +44,8 @@ const mqttOptions = {
   host: '845abfe393b744d3ac7c3553a089236f.s1.eu.hivemq.cloud',
   connectTimeout: 10 * 1000,
   will: { // last will options ie. if the client disconnects
-    topic: `room/${ROOM}/status`, // topic to publish to
-    payload: `offline`, // payload to publish
+    topic: `room/status`, // topic to publish to
+    payload: JSON.stringify({ room: ROOM, status: "offline" }), // payload to publish
     qos: 2, // qos 2 ensures all subscribers notified of disconnect
   }
 };
@@ -96,6 +111,10 @@ async function initConnections() {
     }
   })();
 
+  //connecting to influxDB
+  console.log("[INFO]: DB - Creating InfluxDB client...");
+  const influx = new Influx.InfluxDB(influxOpts)
+
   // connecting to mqtt broker
   console.log("[INFO]: MQTT - Starting MQTT client application...");
   const mqttClient = await (async () => {
@@ -104,7 +123,10 @@ async function initConnections() {
       let client = await mqtt.connectAsync(mqttOptions.host, mqttOptions);
       console.log("[SUCCESS]: MQTT - Connected to cloud MQTT broker");
       // publish a status message to the broker
-      await client.publish(`room/${ROOM}/status`, 'online');
+      await client.publish(`room/status`, JSON.stringify({
+        room: ROOM,
+        status: 'online'
+      }));
       let topics = Array.from(Object.values(sub)) //convert object to array of values
       let resp = await client.subscribe(topics); //subscribe to all topics
       console.log(`[INFO]: MQTT - Subscribed to ${resp.map(topicObj => topicObj.topic)}`)
@@ -131,7 +153,7 @@ async function initConnections() {
     }
   })();
   // return the connection pool, mqtt client and adapter
-  return { dbConn, mqttClient, adapter };
+  return { dbConn, mqttClient, adapter, influx };
 }
 
 // main function
@@ -143,11 +165,14 @@ async function initConnections() {
   const listDevices = async (msg) => {
     try {
       // query database for devices (filter to connected devices if msg == 'connected')
-      let devices = await dbConn.query(`SELECT * FROM devices ${msg.toString() === 'connected' ? 'WHERE connected = 1' : ''}`);
+      let devices = await dbConn.query(`SELECT * FROM devices ${msg.status === 'connected' ? 'WHERE connected = 1' : ''}`);
 
       devices.length > 0 // if devices are found
-        ? mqttClient.publish(pub.list, JSON.stringify(devices)) // publish the list of devices
-        : mqttClient.publish(pub.list, JSON.stringify({ "Error": "No devices found" })); // else publish error message
+        ? mqttClient.publish(`${msg.clientID}/devices`, JSON.stringify({
+          room: ROOM,
+          devices: devices
+        })) // publish the list of devices
+        : mqttClient.publish(`${msg.clientID}/devices`, JSON.stringify({ error: "No devices found" })); // else publish error message
     } catch (err) { console.log(`[ERROR]: ${err}`); } // log any error to console
   }
 
@@ -163,7 +188,7 @@ async function initConnections() {
   }
 
   // function to scan for devices
-  const scan = async () => {
+  const scan = async (client) => {
     // initialise empty array to store devices
     let scannedDevices = [];
 
@@ -189,12 +214,16 @@ async function initConnections() {
     };
     try {
       // publish scanned devices
-      await mqttClient.publish(pubTopic, JSON.stringify(scannedDevices));
+      await mqttClient.publish(`${client}/scan`, JSON.stringify({
+        room: ROOM,
+        devices: scannedDevices
+      }));
     } catch (err) { console.log(`[ERROR]: MQTT - ${err}`); } // log any error to console
   }
 
   // function called when the gateway communicates with a device
-  const updateDeviceAct = async (mac, action, { name } = {}) => {
+  const updateDeviceAct = async (mac, action, { data, name } = {}) => {
+    data = data ? data : mac
     try {
       // get device from database
       let device = await dbConn.query(`SELECT device_id FROM devices WHERE mac_address = '${mac}'`);
@@ -214,7 +243,7 @@ async function initConnections() {
         await dbConn.query(`UPDATE devices SET connected = ${action === 'connect' ? 'TRUE' : 'FALSE'} WHERE device_id = ${id}`);
       }
       // add action to device activity database
-      await dbConn.query(`INSERT INTO device_activity (device_id, activity, timestamp) VALUES ('${id}', '${action}', NOW())`);
+      await dbConn.query(`INSERT INTO device_activity (device_id, activity, data, timestamp) VALUES ('${id}', '${action}', '${data}', NOW())`);
     } catch (err) { console.log(`[ERROR] DB - ${err}`) } // log any error to console
   }
 
@@ -249,9 +278,38 @@ async function initConnections() {
           let data = Buffer.from(buffer, 'hex').readInt32LE();
           try {
             // get characteristic name
-            let charName = get_uuid(await charObj.getUUID()).name
+            let uuid = await charObj.getUUID();
+            console.log(uuid, data);
+            let charName = get_uuid(uuid).name
             // publish the data to the mqtt broker
-            await mqttClient.publish(`${pub.device}/${mac}/${charName}/notify`, data.toString());
+
+            let sensor_id = await dbConn.query(`SELECT sensor_id FROM sensors WHERE sensor_UUID = '${expandUUID(uuid)}'`);
+            sensor_id = sensor_id.length ? sensor_id[0].sensor_id : null;
+            if (uuid === "00000001-0002-0003-0004-000000000001") charName = "CO2";
+
+            influx.writePoints([{
+              measurement: 'sensor_data',
+              tags: {
+                room: ROOM,
+                device_ID: mac,
+                device_name: name,
+                sensor_ID: uuid,
+                sensor_name: charName
+              },
+              fields: {
+                value: Number(data)
+              }
+            }],
+              {
+                database: 'IMicrobit',
+                precision: 'ms'
+              })
+            await dbConn.query(`INSERT INTO sensor_data (sensor_id, value, timestamp) VALUES ('${sensor_id}', '${Number(data)}', NOW())`);
+            await mqttClient.publish(`${pub.device}/notify`, JSON.stringify({
+              device: mac,
+              char: charName,
+              value: data.toString()
+            }));
           } catch (err) { console.log(`[ERROR]: MQTT - ${err}`) } // log any error to console
         })
         return charObj; // return characteristic object to mapped array
@@ -261,7 +319,10 @@ async function initConnections() {
       // update device activity to connected
       await updateDeviceAct(mac, 'connect', { name: name });
       // publish to broker that device has been connected
-      await mqttClient.publish(`${pub.device}/${mac}/status`, 'connected');
+      await mqttClient.publish(`${pub.device}/status`, JSON.stringify({
+        device: mac,
+        status: "connected"
+      }));
     } catch (err) { console.log(`[ERROR]: BLE - ${err}`); } // log any error to console
   }
 
@@ -273,7 +334,10 @@ async function initConnections() {
       await device.disconnect(); // disconnect from device
       console.log(`[SUCCESS]: BLE - Disconnected from ${name}`);
       // publish to broker that device has been disconnected
-      await mqttClient.publish(`${pub.device}/${mac}/status`, 'disconnected');
+      await mqttClient.publish(`${pub.device}/status`, JSON.stringify({
+        device: mac,
+        status: 'disconnected'
+      }));
       // remove device from list of connected devices
       connectedDevices.splice(connectedDevices.findIndex(dev => dev.mac_address === mac), 1);
       // update device activity to disconnected
@@ -282,7 +346,7 @@ async function initConnections() {
   }
 
   // initialising database connection, mqtt client and ble adapter
-  const { dbConn, mqttClient, adapter } = await initConnections();
+  const { dbConn, mqttClient, adapter, influx } = await initConnections();
 
   // initialise all devices in database as disconnected
   await dbConn.query(`UPDATE devices SET connected = FALSE`);
@@ -301,13 +365,16 @@ async function initConnections() {
 
   // function to handle incoming messages from the mqtt broker
   mqttClient.on("message", async (topic, msg) => {
+    msg = JSON.parse(msg);
     console.log(`[INFO]: MQTT - Received message on topic ${topic}`);
-
     // if the topic is a broadcast message
     if (topic === sub.broadcast) {
       try {
         // publish to broker that device is online
-        await mqttClient.publish(`room/${ROOM}/status`, "online");
+        await mqttClient.publish(`${msg.clientID}/room-status`, JSON.stringify({
+          room: ROOM,
+          status: 'online'
+        }));
       } catch (err) { console.log(`[ERROR]: MQTT - ${err}`) } // log any error to console
     }
     // if the topic is a config message
@@ -320,13 +387,13 @@ async function initConnections() {
           listDevices(msg); // list devices
           break;
         case 'scan': // if the command is scan
-          scan(); // scan for devices
+          scan(msg.clientID); // scan for devices
           break;
         case 'connect': // if the command is connect
-          connect(msg.toString()); // connect to device
+          connect(msg.device); // connect to device
           break;
         case 'disconnect': // if the command is disconnect
-          disconnect(msg.toString()); // disconnect from device
+          disconnect(msg.device); // disconnect from device
           break;
         case 'disconnectAll': // if the command is disconnect all
           // disconnect from all devices
@@ -337,14 +404,19 @@ async function initConnections() {
       }
     }
     // if the topic is a device message
-    else if (topic.includes(sub.device.replace('#', ''))) {
+    else if (topic.includes(sub.device.replace('/#', ''))) {
+      let resp = {
+        room: ROOM,
+        device: msg.device,
+      }; // create response object
       // remove the initial device topic
-      let [, set] = topic.split('device/');
-      // get the device mac address, characteristic uuid and command
-      let [mac, uuid, cmd] = set.split('/');
-      // get the devices characteristic object
-      let chars = connectedDevices.find(dev => dev.mac_address === mac)?.chars;
 
+      // get the device mac address, characteristic uuid and command
+      let mac = msg.device;
+      let uuid = msg.char;
+      let cmd = msg.cmd;
+      // get the devices characteristic object
+      let chars = connectedDevices.find(dev => dev.mac_address === msg.device)?.chars;
       // if no uuid in the message topic
       if (!uuid) {
         try {
@@ -356,15 +428,16 @@ async function initConnections() {
             charObj.flags = await char.getFlags();
             return charObj; // return characteristic object to the mapped array
           }));
+
+          resp.chars = charResp; // set the response characteristics
           // publish the array of characteristic objects to the mqtt broker
-          await mqttClient.publish(`${pub.device}/${mac}`, JSON.stringify(charResp));
+          await mqttClient.publish(`${msg.clientID}/chars`, JSON.stringify(resp));
         }
         catch (err) { console.log(`[ERROR]: ${err}`) } // log any error to console
       }
       // if a uuid is in the message topic
       else {
-        // expand the UUID to 128 bits
-        uuid = expandUUID(uuid);
+        uuid = expandUUID(uuid); // expand the UUID to 128 bits
 
         // get the characteristic object by uuid
         let char = await (async () => {
@@ -373,52 +446,72 @@ async function initConnections() {
             if (await chars[i].getUUID() === uuid) return chars[i];
           }
         })();
-
         // if the characteristic object is not found
-        if (!char) {
-          console.log(`[ERROR]: Unknown characteristic ${uuid}`) // log error to console
-          return; // return from function
-        }
+
+        resp.char = get_uuid(uuid).name; // set the response characteristic
         // if the command issued is read
         if (cmd === 'read') {
+          resp.cmd = 'read'; // set the response command
           try {
             // read the characteristic value from the device and convert to an int
             let data = Buffer.from((await char.readValue()), 'hex').readInt32LE();
             // update the device activity database
-            await updateDeviceAct(mac, `read ${uuid}`);
-            // publish the characteristic value to the mqtt broker
-            await mqttClient.publish(`${pub.device}/${mac}/${get_uuid(await char.getUUID()).name}`, data.toString());
+            await updateDeviceAct(mac, `read`, { data: uuid });
+            resp.data = data; // set the response data
+            resp.success = true; // set the response success
           }
-          catch (err) { console.log(`[ERROR]: ${err}`) } // log any error to console
+          catch (err) {
+            console.log(`[ERROR]: BLE - ${err}`); // log any error to console
+            resp.success = false; // set the response success
+            resp.data = `${err}`; // set the response data
+          }
+          // publish the characteristic value to the mqtt broker
+          await mqttClient.publish(`${msg.clientID}/cmd`, JSON.stringify(resp));
         }
         // if the command issued is write
         else if (cmd === 'write') {
+          resp.cmd = 'write'; // set the response command
           try {
             // convert the message to a buffer and write to the characteristic
-            await char.writeValue(Buffer.from(msg.toString()));
+            await char.writeValue(Buffer.from(msg.data.toString()));
             // update the device activity database
-            await updateDeviceAct(mac, `write ${uuid}`);
+            await updateDeviceAct(mac, `write`, { data: uuid });
+            resp.success = true; // set the response success
+            resp.data = msg.data.toString(); // set the response data
           }
-          catch (err) { console.log(`[ERROR]: BLE - ${err}`); } // log any error to console
+          catch (err) {
+            console.log(`[ERROR]: BLE - ${err}`); // log any error to console
+            resp.success = false; // set the response success
+            resp.data = `${err}`; // set the response data
+          }
+          //publish error to mqtt broker
+          await mqttClient.publish(`${msg.clientID}/cmd`, JSON.stringify(resp));
         }
         // if the command issued is notify
         else if (cmd === 'notify') {
+          resp.cmd = 'notify'; // set the response command
           try {
             // if the characteristic is already notifying
             if (await char.isNotifying()) {
               await char.stopNotifications(); // stop notifying
               // update the device activity database
-              await updateDeviceAct(mac, `notify off ${uuid}`);
+              await updateDeviceAct(mac, `notify off`, { data: uuid });
             }
             // if the characteristic is not already notifying
             else {
               await char.startNotifications(); // start notifying
               // update the device activity database
-              await updateDeviceAct(mac, `notify on ${uuid}`);
+              await updateDeviceAct(mac, `notify on`, { data: uuid });
             }
+            resp.success = true; // set the response success
           }
-          catch (err) { console.log(`[ERROR]: BLE - ${err}`) } // log any error to console
-
+          catch (err) {
+            console.log(`[ERROR]: BLE - ${err}`) // log any error to console
+            resp.success = false; // set the response success
+            resp.data = `${err}`; // set the response data
+          }
+          resp.notify = await char.isNotifying(); // set the response notify
+          await mqttClient.publish(`${msg.clientID}/cmd`, JSON.stringify(resp));
         } else {
           // if the command issued is none of the above log an error
           console.log(`[ERROR]: MQTT - Unknown command ${cmd}`);
